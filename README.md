@@ -22,7 +22,7 @@ A [Claude Code](https://claude.ai/code) statusline script that shows a context w
 
 ```bash
 curl -o ~/.claude/statusline.py \
-  https://raw.githubusercontent.com/JohnnyTh/claude-statusline/main/statusline.py
+  https://raw.githubusercontent.com/JohnnyTh/claude-status-bar/main/statusline.py
 chmod +x ~/.claude/statusline.py
 ```
 
