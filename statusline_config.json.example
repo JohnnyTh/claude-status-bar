@@ -1,13 +1,6 @@
 {
   "theme": "corpo",
   "quip_interval": 25,
-  "tier_up_burst_duration": 8,
-  "rolling_window": 5,
-  "efficiency_threshold_efficient": 0.8,
-  "efficiency_threshold_wasteful": 3.0,
-  "model_base_costs": {
-    "claude-haiku-4-5": 0.002,
-    "claude-sonnet-4-6": 0.006,
-    "claude-opus-4-7": 0.010
-  }
+  "xp_base": 50000,
+  "xp_exp": 1.6
 }

@@ -1,0 +1,7 @@
+# Personal usage data lives in ~/.claude and must never be committed
+*.jsonl
+*_stats.json
+*.lock
+*.tmp
+statusline_config.json
+__pycache__/

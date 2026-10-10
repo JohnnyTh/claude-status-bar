@@ -702,12 +702,12 @@ def main() -> None:
     config = deep_merge(DEFAULT_CONFIG, load_json(CONFIG_PATH, {}))
     # Every open session renders concurrently; without a lock their
     # read-modify-write cycles overwrite each other's updates.
-    lock = open(STATS_PATH + ".lock", "w")
     try:
         import fcntl
-        fcntl.flock(lock, fcntl.LOCK_EX)  # released when `lock` closes at exit
+        lock = open(STATS_PATH + ".lock", "w")  # kept open: released at exit
+        fcntl.flock(lock, fcntl.LOCK_EX)
     except (ImportError, OSError):
-        pass  # no fcntl (Windows): fall back to unlocked, as before
+        pass  # no fcntl (Windows) or unwritable dir: fall back to unlocked
     stats = deep_merge(DEFAULT_STATS, load_json(STATS_PATH, {}))
 
     stats = update_session(stats, data, config)
