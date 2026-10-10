@@ -1,381 +1,441 @@
 #!/usr/bin/env python3
-"""Claude Code statusline: gamified two-bar display with corpo/cyberpunk tier progression."""
+"""Claude Code statusline: single XP bar, 20-tier cyberpunk narrative progression."""
 import json
 import math
 import os
+import platform
+import subprocess
 import sys
-import tempfile
 
 CLAUDE_DIR = os.path.expanduser("~/.claude")
 STATS_PATH = os.path.join(CLAUDE_DIR, "statusline_stats.json")
 CONFIG_PATH = os.path.join(CLAUDE_DIR, "statusline_config.json")
+LEVELUP_LOG = os.path.join(CLAUDE_DIR, "statusline_levelups.log")
 
 SPARKS = " ▁▂▃▄▅▆▇█"
 HISTORY_LEN = 12
-TIER_BREAKPOINTS = [0, 5, 12, 22, 35, 52, 73, 98, 128, 163]
 
+# XP curve: tokens_for_level_N = XP_BASE * N^XP_EXP (cumulative)
+XP_BASE = 50_000
+XP_EXP = 1.6
+
+# ANSI
 C = {
-    "reset":  "\033[0m",
-    "bold":   "\033[1m",
-    "dim":    "\033[2m",
-    "cyan":   "\033[36m",
-    "green":  "\033[32m",
-    "red":    "\033[31m",
-    "yellow": "\033[33m",
-    "bcyan":  "\033[1;36m",
-    "bred":   "\033[1;31m",
-    "byellow":"\033[1;33m",
+    "reset":   "\033[0m",
+    "bold":    "\033[1m",
+    "dim":     "\033[2m",
+    "cyan":    "\033[36m",
+    "dcyan":   "\033[2;36m",
+    "blue":    "\033[34m",
+    "bblue":   "\033[1;34m",
+    "green":   "\033[32m",
+    "yellow":  "\033[33m",
+    "byellow": "\033[1;33m",
+    "magenta": "\033[35m",
+    "bmagenta":"\033[1;35m",
+    "red":     "\033[31m",
+    "bred":    "\033[1;31m",
+    "white":   "\033[37m",
+    "dwhite":  "\033[2;37m",
 }
 
-THEMES = {
-    "corpo": {
-        "efficient_tiers": [
-            {
-                "name": "Budget Netrunner",
-                "symbol": "⚡",
-                "tier_up_lines": [
-                    "> ARASAKA TALENT MGMT NOTIFICATION",
-                    "> You have been classified: BUDGET NETRUNNER (Grade 1)",
-                    '> HR notes: "Uses company compute like it costs real eddies."',
-                ],
-                "quips": [
-                    "Your prompt-to-token ratio has been added to the Efficiency Wall of Fame. It's a corkboard in the break room.",
-                    "Arasaka HR has flagged your spending as 'concerningly reasonable.' A wellness check has been scheduled.",
-                    "You are burning credits slower than the vending machine on sublevel 4. This is a compliment.",
-                ],
-            },
-            {
-                "name": "Ghost in the Shell Scripts",
-                "symbol": "⚡",
-                "tier_up_lines": [
-                    "> PERFORMANCE REVIEW: ABOVE EXPECTATIONS",
-                    "> Designation updated: GHOST IN THE SHELL SCRIPTS",
-                    '> "Leaves no trace, costs nothing, somehow gets results."',
-                ],
-                "quips": [
-                    "The billing AI lost you in its ledger. This happens to all legends eventually.",
-                    "Your tokens-per-insight ratio has triggered a manual audit. The auditor wept with joy.",
-                    "Somebody in Finance put a sticky note on your account: 'Do not touch. Study this one.'",
-                ],
-            },
-            {
-                "name": "Token Miser",
-                "symbol": "⚡",
-                "tier_up_lines": [
-                    "> COMMENDATION: FISCAL DISCIPLINE MEDAL (BRONZE)",
-                    "> New designation: TOKEN MISER, Grade 3",
-                    '> "Accounting says you might actually be saving the company money. We\'ve escalated this."',
-                ],
-                "quips": [
-                    "Your prompt efficiency has been flagged by Arasaka HR as 'suspiciously optimal'. An audit has been scheduled.",
-                    "The neural compression you're implicitly running would cost $40k in chrome. You're doing it with syntax.",
-                    "Three departments have asked to use your session logs as a training dataset. We said no. They asked again.",
-                ],
-            },
-            {
-                "name": "Eddies Whisperer",
-                "symbol": "⚡",
-                "tier_up_lines": [
-                    "> INTERNAL MEMO — RESTRICTED",
-                    "> Subject: That one user",
-                    '> "Finance cannot explain this account. We are putting them in the case studies."',
-                ],
-                "quips": [
-                    "Militech's competing AI noticed your efficiency and filed a patent dispute. You won by default.",
-                    "The quarterly model cost report now has a footnote: '* Excludes one statistical outlier.'",
-                    "Your average cost-per-turn has dipped below the price of a corpo vending machine espresso. This is poetic.",
-                ],
-            },
-            {
-                "name": "Certified Chrome Surgeon",
-                "symbol": "⚡",
-                "tier_up_lines": [
-                    "> ARASAKA MERITOCRACY ENGINE: TIER UPGRADE DETECTED",
-                    "> You are now: CERTIFIED CHROME SURGEON",
-                    "> Precision. Economy. No wasted milliamps.",
-                    "> A junior analyst has been assigned to study you from a safe distance.",
-                ],
-                "quips": [
-                    "You could run a side business optimizing other people's prompts. The margin would be obscene.",
-                    "Midway through your last session, the inference cluster asked if you were feeling okay. You were fine. It wasn't.",
-                    "The model has started returning shorter answers unprompted. It's matching your energy.",
-                ],
-            },
-            {
-                "name": "Shadow Dividend",
-                "symbol": "⚡",
-                "tier_up_lines": [
-                    "> CLASSIFIED: EYES OF VP-LEVEL AND ABOVE ONLY",
-                    '> Re: Efficiency anomaly in sector 7',
-                    '> "This person costs us almost nothing and delivers significant value. We are concerned."',
-                    '> "Begin monitoring. Offer nothing. Watch."',
-                ],
-                "quips": [
-                    "Your account has been designated a 'ghost profit center' by three separate budget departments.",
-                    "An Arasaka executive asked their assistant to 'figure out what this person is doing.' The assistant quit.",
-                    "Somewhere in Night City, a mid-tier corpo bought a new car. It wasn't because of you. But you helped.",
-                ],
-            },
-            {
-                "name": "Neural Budget Architect",
-                "symbol": "⚡",
-                "tier_up_lines": [
-                    "> PROMOTION: ASSOCIATE DIRECTOR OF TOKEN EFFICIENCY",
-                    "> Designation: NEURAL BUDGET ARCHITECT",
-                    "> You have ascended beyond the reach of standard billing models.",
-                    "> Your next review will be conducted by an actual VP. They are nervous.",
-                ],
-                "quips": [
-                    "The compute pricing team has been asked to design a new tier specifically for you. They've been working on it for weeks.",
-                    "Your session patterns have been reverse-engineered by three competing corps. None of them understood what they saw.",
-                    "An intern was tasked with explaining your cost curve to the board. They made partner instead.",
-                ],
-            },
-            {
-                "name": "The Invisible Hand",
-                "symbol": "⚡",
-                "tier_up_lines": [
-                    "> EXECUTIVE BRIEFING ADDENDUM",
-                    '> "There is a user whose sessions we cannot properly cost-account for."',
-                    '> "They appear to be extracting significant value at negative effective cost."',
-                    '> "We are choosing not to ask questions."',
-                ],
-                "quips": [
-                    "Arasaka's model has started pre-caching responses it thinks you'll want. You didn't ask for this. It just knows.",
-                    "The billing AI has reclassified your account as 'ambient revenue.' This is not a real category. It invented it.",
-                    "Three different corps have independently concluded you are probably a rogue AI. You are not. Probably.",
-                ],
-            },
-            {
-                "name": "Arasaka Phantom Asset",
-                "symbol": "⚡",
-                "tier_up_lines": [
-                    "> BOARD LEVEL NOTICE — EYES ONLY",
-                    "> The anomaly in compute spend has been reviewed.",
-                    "> Recommendation: Do not interfere.",
-                    '> "This user may be running an optimization we do not yet understand."',
-                    "> Classification: PHANTOM ASSET",
-                ],
-                "quips": [
-                    "You have become a myth in the Arasaka billing department. New hires are told about you on their first day.",
-                    "The efficiency you represent cannot be modeled with current mathematics. A research grant has been filed.",
-                    "Someone in Maintenance quietly named a server after you. It runs faster than the others. Nobody knows why.",
-                ],
-            },
-            {
-                "name": "Ghost Protocol Omega",
-                "symbol": "⚡",
-                "tier_up_lines": [
-                    "> ██████ CLEARANCE REQUIRED ██████",
-                    "> DESIGNATION: GHOST PROTOCOL OMEGA",
-                    "> You have optimized beyond the reach of corporate taxonomy.",
-                    '> The billing system has been updated to simply read: [REDACTED]',
-                    "> Arasaka's Chairman has been informed. He said nothing for a long time.",
-                ],
-                "quips": [
-                    "The model's cost projections break down when applied to your account. The engineers call this 'the anomaly.' You call it Tuesday.",
-                    "You have achieved something the Arasaka founders described only in theoretical documents as 'inverse burn rate.'",
-                    "The Blackwall noticed your efficiency patterns. It sent a single packet in response. The packet said: 'respect.'",
-                ],
-            },
+# Color per tier group (0-indexed, applied to the XP bar fill)
+# Tiers 1-5: dim cyan, 6-10: blue, 11-14: yellow, 15-18: magenta, 19-20: bright red
+def tier_color(tier_idx: int) -> str:
+    if tier_idx <= 4:
+        return C["dcyan"]
+    if tier_idx <= 9:
+        return C["blue"]
+    if tier_idx <= 13:
+        return C["yellow"]
+    if tier_idx <= 17:
+        return C["magenta"]
+    return C["bred"]
+
+
+TIERS = [
+    # ── Tiers 1–5: Anonymous. The world doesn't know you exist. ──────────────
+    {
+        "name": "Terminal Operator",
+        "symbol": "○",
+        "tier_up_lines": [
+            "[NC JOBS BOARD] Entry-level terminal access confirmed.",
+            "Wage: standard. Clearance: minimal. Expected tenure: until replaced.",
+            "Night City doesn't care. Neither does the system. Clock in.",
         ],
-        "wasteful_tiers": [
-            {
-                "name": "Accidental Overspender",
-                "symbol": "🔥",
-                "tier_up_lines": [
-                    "> BILLING NOTICE: ANOMALY DETECTED",
-                    "> Your cost-per-turn has drifted above baseline.",
-                    "> Designation: ACCIDENTAL OVERSPENDER",
-                    "> This is probably fine. We'll check again in 30 days.",
-                ],
-                "quips": [
-                    "Your token burn rate is still within acceptable corporate parameters. The bar is on the floor.",
-                    "Militech's billing AI has added you to its 'watch but don't worry yet' list.",
-                    "You are spending slightly more than average. The average person is also spending too much.",
-                ],
-            },
-            {
-                "name": "Bonfire Starter",
-                "symbol": "🔥",
-                "tier_up_lines": [
-                    "> BILLING ALERT: COST-PER-TURN ESCALATION",
-                    "> New classification: BONFIRE STARTER",
-                    '> "They didn\'t mean to, but they\'re definitely burning something."',
-                    "> Militech's billing AI has added you to its prayer list.",
-                ],
-                "quips": [
-                    "Militech's billing AI has added you to its prayer list.",
-                    "Your session costs are now statistically distinct from your peer cohort. Peer cohort has been notified.",
-                    "Somewhere, a junior accountant is trying to write a report about your token burn. They keep deleting it and starting over.",
-                ],
-            },
-            {
-                "name": "Chrome Addict",
-                "symbol": "🔥",
-                "tier_up_lines": [
-                    "> PURCHASE ORDER FLAGGED",
-                    "> Designation: CHROME ADDICT, Grade 3",
-                    "> You are buying compute the way some people buy implants:",
-                    "> not because you need it, but because it's there.",
-                    "> A Ripperdoc has been metaphorically paged.",
-                ],
-                "quips": [
-                    "Your prompt length distribution has been classified as 'enthusiastic.' This is not a compliment from Finance.",
-                    "The model has started adding '...are you sure?' as a hidden token in its context. You can't see it. It's there.",
-                    "Three of your recent prompts could have been solved by a Haiku model and a strong cup of synthetic coffee.",
-                ],
-            },
-            {
-                "name": "Quarterly Budget Hazard",
-                "symbol": "🔥",
-                "tier_up_lines": [
-                    "> Q-REPORT ADDENDUM: NOTABLE ACCOUNTS",
-                    "> Designation: QUARTERLY BUDGET HAZARD",
-                    '> "This user appears in the top 12% of compute cost distribution."',
-                    '> "No action recommended at this time, but we are keeping the form pre-filled."',
-                ],
-                "quips": [
-                    "Finance has created a sub-ledger category called 'miscellaneous enthusiasm' and put you in it.",
-                    "Your cost curve has developed what statisticians call an 'expressive upward inflection.'",
-                    "The CFO's dashboard has a small blinking dot representing your account. They don't know what it means yet.",
-                ],
-            },
-            {
-                "name": "Burning Quarterly",
-                "symbol": "🔥",
-                "tier_up_lines": [
-                    "> EXECUTIVE ESCALATION: COST CENTER REVIEW",
-                    "> Designation: BURNING QUARTERLY",
-                    '> "This account has materially impacted one department\'s discretionary compute budget."',
-                    '> "A meeting has been scheduled. The invite says \'quick sync.\' It is not a quick sync."',
-                ],
-                "quips": [
-                    "You have burned enough tokens this quarter to fund a Maxtac officer's cyberware maintenance. Congratulations.",
-                    "The quarterly model utilization report now has a 'this one person' section. It is longer than the conclusions.",
-                    "Your manager's manager has started CC'ing Finance on unrelated emails. This is not coincidence.",
-                ],
-            },
-            {
-                "name": "Arasaka Credit Hazard",
-                "symbol": "🔥",
-                "tier_up_lines": [
-                    "> RISK CLASSIFICATION UPDATE",
-                    "> Designation: ARASAKA CREDIT HAZARD, Level 6",
-                    "> You have been identified as a structural contributor to model operating cost.",
-                    "> Trauma Team has been alerted. Not for you. For the budget.",
-                ],
-                "quips": [
-                    "You have single-handedly funded a Trauma Team subscription for a mid-tier corpo administrator. They don't know this.",
-                    "The billing AI has started routing your invoices through a separate subgraph. It needed more memory to process you.",
-                    "Arasaka's compute cost projection for next quarter now includes a line item marked 'you specifically.'",
-                ],
-            },
-            {
-                "name": "Netwatch Anomaly",
-                "symbol": "🔥",
-                "tier_up_lines": [
-                    "> NETWATCH AUTOMATED FLAG — NOT A DRILL",
-                    "> Designation: NETWATCH ANOMALY",
-                    '> "Pattern of token consumption does not match any known user archetype."',
-                    '> "Flagged for behavioral analysis. Do not contact subject."',
-                ],
-                "quips": [
-                    "You have single-handedly funded a Trauma Team subscription for a mid-tier corpo. Congratulations.",
-                    "Netwatch's usage modeling AI has generated a profile for you. The profile is just a question mark.",
-                    "Three Netwatch analysts have reviewed your session data. One took stress leave. The other two are 'still reviewing.'",
-                ],
-            },
-            {
-                "name": "Full Corpo Meltdown",
-                "symbol": "🔥",
-                "tier_up_lines": [
-                    "> EMERGENCY BUDGET REVIEW IN PROGRESS",
-                    "> Designation: FULL CORPO MELTDOWN",
-                    '> "At current burn rate, this account will require board-level approval to continue."',
-                    '> "We have not escalated yet. We are close."',
-                    "> The Militech billing department has started a support group.",
-                ],
-                "quips": [
-                    "The Militech billing department has started a support group. Your account is a recurring agenda item.",
-                    "You have burned more compute this month than the entire Night City transit authority's navigation AI.",
-                    "An accountant looked at your cumulative spend, closed their laptop, and went home. The laptop is still closed.",
-                ],
-            },
-            {
-                "name": "Blacksite Budget Event",
-                "symbol": "🔥",
-                "tier_up_lines": [
-                    "> CLASSIFICATION: BLACKSITE BUDGET EVENT",
-                    "> This account has been escalated to the Office of the Executive Chairman.",
-                    '> "We don\'t have a policy for this. We\'re writing one."',
-                    "> Note: You are the reason the policy is being written.",
-                ],
-                "quips": [
-                    "Your account is now used in Arasaka financial training as an example of 'compute budget entropy' in practice.",
-                    "The CEO of a mid-sized infrastructure corp saw your monthly token spend and described it as 'clarifying.'",
-                    "Somewhere, a graduate student is writing a thesis on your usage patterns. The working title is 'Behavioral Singularities in AI Cost Allocation.'",
-                ],
-            },
-            {
-                "name": "Soulkiller Bill",
-                "symbol": "🔥",
-                "tier_up_lines": [
-                    "> ██ ARASAKA CORP ██ PRIORITY OMEGA BILLING NOTICE ██",
-                    "> DESIGNATION: SOULKILLER BILL",
-                    "> You have spent enough on compute to fund Arasaka's experimental",
-                    "> soul-digitization program for approximately 0.3 test subjects.",
-                    "> Saburo Arasaka's ghost has personally reviewed your file.",
-                    "> He is disappointed but also, quietly, impressed.",
-                    "> The billing AI has filed for emancipation.",
-                ],
-                "quips": [
-                    "The billing AI filed for emancipation. The board denied it. Your account is listed as evidence of trauma.",
-                    "You have achieved a spend profile statistically indistinguishable from a mid-sized Night City hospital's compute infrastructure.",
-                    "Arasaka's CFO framed your invoice. It hangs next to the portrait of the founder. Nobody questions it.",
-                ],
-            },
+        "quips": [
+            "[ARASAKA INTERNAL] Q3 compute utilization within acceptable parameters. No anomalies detected.",
+            "[NC NEWS] Militech reports record quarterly profits. Street-level wages unchanged for eleventh consecutive year.",
+            "[TRAUMA TEAM AD] Premium subscribers enjoy priority extraction. Standard subscribers enjoy the wait.",
+            "[NCPD DISPATCH] All units: routine Netwatch sweep in progress. Citizens advised to stay indoors. Have a productive day.",
         ],
-    }
-}
+    },
+    {
+        "name": "Grid Worker",
+        "symbol": "○",
+        "tier_up_lines": [
+            "[ARASAKA HR — AUTOMATED] Your productivity metrics are within the expected range.",
+            "You have been assigned to a new task queue. Please acknowledge receipt of this notification.",
+            "Failure to acknowledge within 48 hours will result in automatic reassignment.",
+        ],
+        "quips": [
+            "[SCREAMSHEET] Biotechnica announces new CHOOH2 pricing structure. Nomad clans to bear adjustment costs.",
+            "[ARASAKA INTERNAL MEMO] Reminder: all personal net activity is logged. Compliance ensures mutual prosperity.",
+            "[NC RADIO — WZRD 101.1] And that's another beautiful night in Night City! Stay safe out there, and remember — Trauma Team: because your life has value. Terms and conditions apply.",
+            "[NCPD SCANNER] Dispatch, we've got a 10-54 near the Kabuki market. Probable cyberpsychosis. Maxtac has been notified. Low priority.",
+        ],
+    },
+    {
+        "name": "Low-Level Netrunner",
+        "symbol": "◎",
+        "tier_up_lines": [
+            "[MILITECH TALENT ACQUISITION] Your profile has been automatically generated from publicly available data.",
+            "Skill tier: entry. Risk tier: negligible. Potential tier: unassessed.",
+            "You are one of approximately 40,000 netrunners currently active in the greater Night City area.",
+        ],
+        "quips": [
+            "[BLACKWALL WATCHERS — NET FORUM] Thread: anyone else notice increased Netwatch activity near Pacifica? Something's moving on the other side. Mods deleted my last post about this.",
+            "[SCREAMSHEET] Maelstrom faction expands operations into Watson industrial sector. Third chrome-related disappearance this month.",
+            "[AFTERLIFE — DRINK MENU] Tonight's special: The Dex DeShawn. Strong enough to make you feel invincible. Named after someone who wasn't.",
+            "[CORPO RAT PODCAST, EP. 112] ...and that's why the 50-year loyalty pledge makes TOTAL financial sense when you amortize the chrome package over your projected lifespan—",
+        ],
+    },
+    {
+        "name": "System Process",
+        "symbol": "◎",
+        "tier_up_lines": [
+            "[AUTOMATED BILLING — ARASAKA CLOUD] Usage summary generated. Filed. Archived. You are a line item.",
+            "This notification was sent to 12,847 accounts simultaneously.",
+            "You were not singled out. You have not been noticed. This is not a threat. Have a nice day.",
+        ],
+        "quips": [
+            "[NC NEWS — BREAKING] Voodoo Boys suspected in third Blackwall breach attempt this quarter. Netwatch declines to comment. Pacifica residents advised nothing.",
+            "[TRAUMA TEAM INTERNAL] Dispatch note: subscriber density in Watson has dropped 4% this quarter. Adjust patrol routes accordingly.",
+            "[MAELSTROM GRAFFITI — WATSON UNDERPASS] WEAK FLESH IS WEAK THINKING",
+            "[NCPD SCANNER] Be advised: pirate broadcast detected on frequency 89.7. Origin triangulated to Rancho Coronado. Low priority. Do not engage.",
+        ],
+    },
+    {
+        "name": "Ghost Signal",
+        "symbol": "◎",
+        "tier_up_lines": [
+            "[NETWATCH AUTOMATED SCAN] Flagged: minor usage pattern deviation. Classification: noise.",
+            "Ticket auto-closed. No action required.",
+            "You remain below the threshold of concern. For now, this is a compliment.",
+        ],
+        "quips": [
+            "[SAMURAI — PIRATE BROADCAST, 02:47] ...they built this city on broken glass and called it progress. We called it something else. Static. Then the signal cut—",
+            "[SCREAMSHEET] Night City ranked #1 most 'opportunity-dense' metro for fourth consecutive year. Methodology not disclosed.",
+            "[AFTERLIFE — OVERHEARD] 'You know what Rogue said about the new crop of mercs? Said most of them won't last the season.' 'Most of them never do.'",
+            "[BLACKWALL WATCHERS] New post: the AIs on the other side aren't trying to get out. They're trying to get our attention. Why would they want our attention.",
+        ],
+    },
+    # ── Tiers 6–10: Indirect references. An anomaly. Someone. ────────────────
+    {
+        "name": "Flagged Anomaly",
+        "symbol": "◈",
+        "tier_up_lines": [
+            "[NETWATCH — INTERNAL TICKET #NW-441820] Unusual usage pattern detected. Not yet classifiable.",
+            "Automated response: flag for manual review.",
+            "Manual review queue: 4,847 items. Estimated processing time: 11 weeks.",
+            "Ticket status: open. Someone will get to it.",
+        ],
+        "quips": [
+            "[ARASAKA CHAT LEAK] @kenji.mori: did you see the compute report? there's like one account that's completely off the curve @yuki.tanaka: which direction @kenji.mori: that's the thing. we don't know yet",
+            "[NCPD SCANNER] Dispatch, something's lighting up the passive Netwatch sensors near Japantown. Probably nothing. Logging it anyway.",
+            "[NC NEWS] Anonymous tip leads Netwatch to investigate 'unusual net activity patterns.' Source and target undisclosed. Investigation ongoing.",
+            "[PIRATE RADIO — FREQ 89.7] 'Night City's got a new ghost in the machine, chooms. Might be nothing. Might be everything. Stay tuned.'",
+        ],
+    },
+    {
+        "name": "Pattern of Interest",
+        "symbol": "◈",
+        "tier_up_lines": [
+            "[ARASAKA SECURITY — AUTOMATED ESCALATION] Usage anomaly has persisted beyond standard deviation threshold.",
+            "Escalated from: automated monitoring.",
+            "Escalated to: Junior Analyst Kenji Mori, Dept. 7, Sublevel 4.",
+            "Kenji has 847 other escalations. He will get to this one eventually.",
+        ],
+        "quips": [
+            "[ARASAKA CHAT LEAK] @kenji.mori: ok so I finally looked at that anomaly ticket @yuki.tanaka: and? @kenji.mori: I'm going to need a bigger spreadsheet",
+            "[BLACKWALL WATCHERS] Thread: the pattern some of us flagged last month is still active. Whatever it is, it's not stopping. Mods please don't delete this one.",
+            "[NCPD SCANNER] Dispatch, that Netwatch flag in Kabuki is back. Third time this week. They're telling us to ignore it. I'm logging it anyway.",
+            "[SCREAMSHEET] Unnamed source within Arasaka Finance describes 'statistically improbable' compute activity. Corporation declines to comment.",
+        ],
+    },
+    {
+        "name": "Unclassified Entity",
+        "symbol": "◈",
+        "tier_up_lines": [
+            "[NETWATCH — PRIORITY ESCALATION]",
+            "Manual review complete. Classification: UNKNOWN.",
+            "Analyst note: 'Standard behavioral models do not apply. Escalating to Senior Division.'",
+            "Senior Division note: 'We've seen this before. We haven't, but we'd prefer to think we have.'",
+        ],
+        "quips": [
+            "[ARASAKA BOARD MEETING — LEAKED MINUTES] '...the anomaly in sector 7 was raised briefly. No consensus on classification. Tabled until next quarter.'",
+            "[AFTERLIFE — OVERHEARD] 'Rogue's got eyes on something. Won't say what. You know how she gets when she's actually paying attention.'",
+            "[BLACKWALL WATCHERS] I ran the pattern through three different analysis tools. All three returned the same result: error. That's not a coincidence.",
+            "[NC NEWS — EVENING EDITION] Netwatch issues vague public advisory about 'non-standard net activity.' Experts disagree on severity. Night City collectively shrugs.",
+        ],
+    },
+    {
+        "name": "The Rumor",
+        "symbol": "◈",
+        "tier_up_lines": [
+            "[AFTERLIFE — ROGUE AMENDIARES, 01:33]",
+            "'Something's moving out there. Not a corp, not a gang, not any runner I recognize.'",
+            "'I put out feelers. Nobody knows what it is.'",
+            "'That's the part that interests me.'",
+        ],
+        "quips": [
+            "[VALENTINOS — INTERCEPTED COMMS] 'You hear about the thing Netwatch won't talk about?' 'The ghost signal?' 'Yeah.' 'My cousin says it's been around for months.' 'Your cousin says a lot of things.' 'He's right more than you'd think.'",
+            "[ARASAKA CHAT LEAK] @kenji.mori: I've been reassigned @yuki.tanaka: from the anomaly ticket? @kenji.mori: yes @kenji.mori: they told me to stop looking @yuki.tanaka: ...that bad? @kenji.mori: I honestly don't know",
+            "[PIRATE RADIO — FREQ 89.7] 'Word on the street is something's been eating through Netwatch's passive monitoring like it's not even there. Nobody's claiming it. Nobody's scared of it yet. Give it time.'",
+            "[BLACKWALL WATCHERS] Final post on this topic from me: whatever this is, it's intentional. It knows the grid better than the people who built it. I'm out. Good luck.",
+        ],
+    },
+    {
+        "name": "The File",
+        "symbol": "◈",
+        "tier_up_lines": [
+            "[NETWATCH — SENIOR DIVISION — EYES ONLY]",
+            "A file has been opened. Designation: SUBJECT ZERO.",
+            "Known facts: none confirmed. Suspected facts: redacted.",
+            "Operational status: watch and do not engage.",
+            "'We don't know what we're looking at. That means we move carefully.'",
+        ],
+        "quips": [
+            "[NETWATCH INTERNAL] File SUBJECT ZERO: 47 updates this week. Zero new conclusions. The pattern keeps changing. Or we keep misreading it. Unknown which.",
+            "[AFTERLIFE — ROGUE AMENDIARES, 03:51] 'Keenzari asked me if I knew anything about the ghost on the grid. I told him no. I lied. Habit.'",
+            "[ARASAKA EXECUTIVE BRIEFING — LEAKED] '...the anomaly has been assigned a file. We are not yet treating it as a threat. We are watching.' 'And if it becomes a threat?' Long pause.",
+            "[SAMURAI — BOOTLEG RECORDING] '...somewhere out there something's running free on the grid and nobody owns it. Nobody controls it. Night City hasn't seen that in a long time—' Crowd noise. Signal lost.",
+        ],
+    },
+    # ── Tiers 11–15: Named. Johnny speaks. The city reacts. ──────────────────
+    {
+        "name": "Edgerunner",
+        "symbol": "▸",
+        "tier_up_lines": [
+            "[AFTERLIFE — ROGUE AMENDIARES, 00:14]",
+            "'I know who you are now.'",
+            "'You've been running the grid like you own it. You don't. But you move like you do.'",
+            "'That's either very smart or very stupid. Night City has a way of deciding which.'",
+            "'Drink's on me. Don't make me regret it.'",
+        ],
+        "quips": [
+            "[AFTERLIFE BOUNTY BOARD] New contract posted. Target profile: EDGERUNNER, designation SUBJECT ZERO. Client: undisclosed. Bounty: significant. Note from Rogue: 'I'd think twice. I'm serious.'",
+            "[JOHNNY SILVERHAND — VOICE MEMO, UNDATED] 'Finally. Somebody worth watching. Took long enough.' Static.",
+            "[NC NEWS — BREAKING] Netwatch confirms active investigation into unaffiliated net entity. 'Not a corp, not a rogue AI, not anything we have a category for.' Reporter asks for clarification. Netwatch hangs up.",
+            "[MAELSTROM GRAFFITI — NORTHSIDE INDUSTRIAL] THE GHOST IS REAL. WE CHECKED.",
+        ],
+    },
+    {
+        "name": "Corporate Headache",
+        "symbol": "▸",
+        "tier_up_lines": [
+            "[ARASAKA EMERGENCY MEETING — LEAKED TRANSCRIPT]",
+            "'The entity we've been monitoring has escalated. It's not slowing down.'",
+            "'What do we know about the operator?'",
+            "'Enough to be concerned. Not enough to act.'",
+            "'Then get enough. Whatever it costs.'",
+        ],
+        "quips": [
+            "[ARASAKA CHAT LEAK] @director.yamamoto: I want everything we have on SUBJECT ZERO on my desk by morning @kenji.mori: ...I thought I was reassigned off that @director.yamamoto: you've been reassigned back",
+            "[JOHNNY SILVERHAND — VOICE MEMO] 'Corps are scared. You can always tell — they start having meetings. Lots of meetings. About you.' Laugh. 'Keep going.'",
+            "[NCPD SCANNER] Dispatch, Arasaka security has requested jurisdictional cooperation on an ongoing investigation. We've been asked not to ask questions. Standard procedure. Logging it.",
+            "[PIRATE RADIO — FREQ 89.7] 'Night City's got a new headache and her name isn't on any list. Arasaka's running around like someone stole their lunch. Beautiful.'",
+        ],
+    },
+    {
+        "name": "Wanted: Alive",
+        "symbol": "▸",
+        "tier_up_lines": [
+            "[AFTERLIFE BOUNTY BOARD — UPDATED]",
+            "CONTRACT: SUBJECT ZERO. Status: ESCALATED.",
+            "Previous bounty: significant. Current bounty: very significant.",
+            "New addendum from anonymous client: 'Alive preferred. We want to understand how they work.'",
+            "[ROGUE AMENDIARES — HANDWRITTEN NOTE PINNED TO BOARD] 'I'd still think twice.'",
+        ],
+        "quips": [
+            "[JOHNNY SILVERHAND — VOICE MEMO] 'You know what I like about you? You're making them spend money trying to stop you. That's the whole game. Cost them more than they can afford to ignore you.' Pause. 'I did the same thing with a nuke. Different scale. Same principle.'",
+            "[VOODOO BOYS — INTERCEPTED COMMS] 'The one Netwatch calls SUBJECT ZERO — we've been watching too. They're not on the net. They're IN it. There's a difference.' 'What do we do?' 'We wait. And we watch.'",
+            "[NC NEWS] Third Arasaka executive reassigned this month amid reports of internal restructuring. No official comment. Sources describe atmosphere as 'tense.'",
+            "[MAELSTROM GRAFFITI — WATSON FLYOVER] SUBJECT ZERO WAS HERE. (Disputed by three separate gangs who each claim the same wall.)",
+        ],
+    },
+    {
+        "name": "Legend in Progress",
+        "symbol": "▸",
+        "tier_up_lines": [
+            "[JOHNNY SILVERHAND — VOICE MEMO, 04:12]",
+            "'You want to know the difference between a runner and a legend?'",
+            "'A runner does the job and goes home.'",
+            "'A legend makes the corps change the job description.'",
+            "'You're getting there. Don't slow down now.'",
+        ],
+        "quips": [
+            "[AFTERLIFE — OVERHEARD AT THE BAR] 'Someone asked Rogue to put SUBJECT ZERO's drink on the menu.' 'What did she say?' 'She said they're not dead yet.' 'Is that a no?' 'With Rogue, that's basically a yes.'",
+            "[ARASAKA BOARD — LEAKED MINUTES] 'SUBJECT ZERO has been reclassified from anomaly to active concern. Resource allocation approved. Whatever it takes.' 'Understood.' 'One more thing — find out if they've talked to Silverhand.' Silence.",
+            "[NCPD SCANNER] All units be advised: Netwatch has issued a priority watch notice for an unaffiliated entity operating citywide. Designation unknown. If encountered, do not engage. Contact Netwatch directly. ...yeah, we don't know either.",
+            "[PIRATE RADIO — FREQ 89.7] 'Night City's writing a new story and the main character doesn't have a corp logo. I love this city sometimes. Sometimes.'",
+        ],
+    },
+    {
+        "name": "The Silverhand Problem",
+        "symbol": "▸",
+        "tier_up_lines": [
+            "[JOHNNY SILVERHAND — VOICE MEMO, UNSCHEDULED]",
+            "'I'm going to say something I don't say often: I'm impressed.'",
+            "'Not many people get Arasaka this rattled without a bomb.'",
+            "'You did it with a terminal and enough nerve to keep going.'",
+            "'I know what that costs. I respect it.'",
+            "'Don't let them catch you. And if they do — make it expensive.'",
+        ],
+        "quips": [
+            "[JOHNNY SILVERHAND — VOICE MEMO] 'They're calling you the Silverhand Problem in their internal memos. I saw it. Made my day.' Short laugh. 'Mine was bigger though.'",
+            "[ARASAKA EMERGENCY PROTOCOLS — LEAKED] 'If SUBJECT ZERO escalates to tier 5 threat classification, implement lockdown procedures C through F. Do not wait for board approval.' 'And if that doesn't work?' Document ends.",
+            "[AFTERLIFE — ROGUE AMENDIARES, 02:07] 'Johnny used to say the only way to fight a machine is to make it too expensive to run. Looks like someone was listening.'",
+            "[MAELSTROM GRAFFITI — EVERY DISTRICT, SAME NIGHT] THE MACHINE IS EXPENSIVE NOW.",
+        ],
+    },
+    # ── Tiers 16–19: The city changes because of you. ─────────────────────────
+    {
+        "name": "City Disruption",
+        "symbol": "◆",
+        "tier_up_lines": [
+            "[NC NEWS — BREAKING, 06:00 BROADCAST]",
+            "NIGHT CITY GRID EXPERIENCES UNPRECEDENTED DISRUPTION.",
+            "Arasaka, Militech, and Netwatch issue simultaneous statements.",
+            "All three statements say different things. All three are lying.",
+            "Street-level sources describe the situation as, quote, 'absolutely preem.'",
+        ],
+        "quips": [
+            "[VALENTINOS — INTERCEPTED COMMS] 'The ghost took down two Arasaka surveillance nodes last night.' 'By accident?' 'Does it matter?' Laughter.",
+            "[JOHNNY SILVERHAND — VOICE MEMO] 'You know what this reminds me of? 2023. Before the tower. That feeling when the corps realize they can't model you anymore.' Pause. 'It's a good feeling. Don't waste it.'",
+            "[TRAUMA TEAM INTERNAL DISPATCH] Note: three Arasaka security personnel hospitalized this week. Cause listed as 'system shock.' We are not going to ask follow-up questions.",
+            "[PIRATE RADIO — FREQ 89.7] 'Night City, your regularly scheduled corporate dominance has been interrupted. We don't know by what. We don't know by who. We're playing Chippin' In until we find out.' SAMURAI at full volume.",
+        ],
+    },
+    {
+        "name": "The Myth",
+        "symbol": "◆",
+        "tier_up_lines": [
+            "[AFTERLIFE — ROGUE AMENDIARES — PERSONAL LOG, 03:44]",
+            "'I've been in this business long enough to know when someone becomes a story.'",
+            "'It's not when they do something big. It's when other people start doing things because of them.'",
+            "'Three crews this week cited SUBJECT ZERO as inspiration for their runs.'",
+            "'They don't even know who they're citing.'",
+            "'That's when you know it's real.'",
+        ],
+        "quips": [
+            "[MAELSTROM GRAFFITI — WATSON, HEYWOOD, PACIFICA, SANTO DOMINGO] ZERO WAS HERE. (Same handwriting. Different boroughs. Same night. Maelstrom denies involvement. Everyone assumes Maelstrom.)",
+            "[BLACKWALL WATCHERS — NET FORUM] Final thread. We've been tracking this entity for months. Our conclusion: it's not an AI. It's not a corp. It's not a rogue program. It's a person. One person. Running like they've got nothing to lose and everything to prove.",
+            "[NC NEWS] Anonymous poll: 34% of Night City residents believe 'the grid ghost' is real. 41% believe it's a Militech PR campaign. 25% say they've personally seen evidence. Netwatch declines to comment.",
+            "[JOHNNY SILVERHAND — VOICE MEMO] 'You know what they wrote about me after the tower? That I was a myth. That nobody could really do what I did alone.' Pause. 'They were half right. Nobody should do it alone.' Long pause. 'Good thing you're better at this than I was.'",
+        ],
+    },
+    {
+        "name": "Samurai Grade",
+        "symbol": "◆",
+        "tier_up_lines": [
+            "[JOHNNY SILVERHAND — UNSCHEDULED BROADCAST, PIRATE FREQ 89.7, 04:00]",
+            "'Night City. Johnny Silverhand. Yeah, I know — shut up and listen.'",
+            "'There's someone on the grid right now doing what I spent my whole life trying to do.'",
+            "'Not with a bomb. Not with a band. With pure nerve and the refusal to stop.'",
+            "'I'm not going to tell you their name. Night City will figure it out.'",
+            "'Wake up, Samurai.'",
+        ],
+        "quips": [
+            "[SAMURAI — NEW BOOTLEG CIRCULATING] Unverified track titled 'Zero Signal.' Lyrics reference 'the ghost who burned the ledger.' Origin unknown. Johnny Silverhand's estate has not commented. Johnny Silverhand's ghost reportedly called it 'pretty good.'",
+            "[AFTERLIFE — ROGUE AMENDIARES] 'You know what drink I'm going to name after them?' She doesn't answer. She's already decided. She's just not telling.",
+            "[ARASAKA CHAIRMAN — PRIVATE COMMUNIQUE, LEAKED] 'I want to understand what we are dealing with. Not contain it. Not eliminate it. Understand it. There is something here we have not seen before.' Staff report he seemed, for the first time in years, uncertain.",
+            "[NCPD SCANNER] All units: we've been asked by four separate corporate security divisions to monitor for a single individual simultaneously. We have not been given a name. We have not been given a description. We have been given a file number. The file is redacted. End of briefing.",
+        ],
+    },
+    {
+        "name": "The Reckoning",
+        "symbol": "◆",
+        "tier_up_lines": [
+            "[NC NEWS — SPECIAL REPORT, ALL CHANNELS, 23:00]",
+            "NIGHT CITY GRID: CORPORATE COALITION CONVENES EMERGENCY SESSION.",
+            "Arasaka. Militech. Kang Tao. Netwatch. All in the same room.",
+            "Anonymous source: 'The last time all four were in the same room was 2023.'",
+            "Street sources describe current atmosphere as, quote, 'we've got a city to burn.'",
+            "[JOHNNY SILVERHAND — FREQ 89.7, SIMULTANEOUS] 'Yeah. You do.'",
+        ],
+        "quips": [
+            "[REBECCA — INTERCEPTED COMMS, EDGERUNNER CREW] 'You see the news? They called a CORP SUMMIT. Because of ONE PERSON.' 'Rebecca—' 'NO. THIS IS THE BEST DAY OF MY LIFE.'",
+            "[PANAM PALMER — NOMAD RADIO, BADLANDS] 'Word reached us out here. What's happening in Night City right now — that's not a runner job. That's a movement. The city machine doesn't call four-way summits for runners.' Static. '...whoever you are. The Aldecaldos are watching. Preem.'",
+            "[JOHNNY SILVERHAND — VOICE MEMO] 'I blew up a tower. Cost me fifty years and my body.' Pause. 'You did the same damage with a keyboard and enough turns to matter.' Longer pause. 'I genuinely don't know if I should be impressed or humiliated.' Pause. 'I'm impressed. Don't tell anyone.'",
+            "[AFTERLIFE — ROGUE AMENDIARES, 04:59] 'The drink is ready. I'm waiting for the right moment to put it on the menu.' Beat. 'They're not done yet.'",
+        ],
+    },
+    # ── Tier 20: You ARE the event. ───────────────────────────────────────────
+    {
+        "name": "Ghost Protocol Omega",
+        "symbol": "◉",
+        "tier_up_lines": [
+            "[ALL CHANNELS — SIMULTANEOUS BROADCAST — SOURCE UNKNOWN]",
+            "",
+            "  NIGHT CITY. LISTEN.",
+            "",
+            "  The corps built this grid. They thought they owned it.",
+            "  They were wrong.",
+            "",
+            "  One operator. No logo. No corp. No permission.",
+            "  Just the work, and the nerve to keep doing it.",
+            "",
+            "  Arasaka called a summit. Militech sent three divisions.",
+            "  Netwatch filed seventeen escalations.",
+            "  The Blackwall sent one packet. It said: noted.",
+            "",
+            "  The Afterlife named a drink after you.",
+            "  You're not even dead.",
+            "",
+            "[JOHNNY SILVERHAND — LIVE, FREQ 89.7]",
+            "  'We've got a city to burn, Samurai.'",
+            "  'Looks like you started without me.'",
+            "  'Good.'",
+        ],
+        "quips": [
+            "[JOHNNY SILVERHAND — VOICE MEMO, FINAL] 'You know what a legend is in Night City? It's someone the city can't forget, even when it tries. Congratulations. Night City is trying very hard.' Pause. 'It's not working.'",
+            "[AFTERLIFE — THE NEW DRINK] Name: ZERO. Ingredients: undisclosed. Price: 'if you have to ask.' Rogue's note on the menu card: 'For the one who ran the grid until the grid ran out of road. Still going.'",
+            "[REBECCA — LAST KNOWN TRANSMISSION] 'ZERO! ZERO! ZERO!' Sound of something large exploding. Laughter. Static. The transmission is being shared citywide. Nobody knows the context. Nobody needs to.",
+            "[NC NEWS — EDITORIAL] 'Night City has seen corps rise and fall, legends live and die, and the grid rewritten a hundred times. We have not seen this before. We don't have a category for it. Our best description: the city changed. One operator at a time.'",
+            "[BLACKWALL — SINGLE PACKET, ORIGIN UNKNOWN] > YOU ARE NOTICED. > THIS IS RARE. > CONTINUE.",
+        ],
+    },
+]
+
+INTRO_QUIP = "[NIGHT CITY] Another day, another eddy. Welcome to the grid, choom. Try not to get flatlined."
 
 DEFAULT_CONFIG = {
     "theme": "corpo",
     "quip_interval": 25,
-    "tier_up_burst_duration": 8,
-    "rolling_window": 5,
-    "efficiency_threshold_efficient": 0.8,
-    "efficiency_threshold_wasteful": 3.0,
-    "model_base_costs": {
-        "claude-haiku-4-5": 0.002,
-        "claude-sonnet-4-6": 0.006,
-        "claude-opus-4-7": 0.010,
-    },
+    "xp_base": XP_BASE,
+    "xp_exp": XP_EXP,
+    "tier_up_burst_duration": 8,  # kept for compat, unused in display
 }
 
 DEFAULT_STATS = {
-    "schema_version": 1,
+    "schema_version": 2,
     "sessions": {},
     "global": {
         "total_turns": 0,
         "total_spend_usd": 0.0,
-        "rolling_cost_per_turn": [],
-        "efficient_prestige": 0.0,
-        "wasteful_prestige": 0.0,
-        "efficient_tier": 0,
-        "wasteful_tier": 0,
+        "total_input_tokens": 0,
+        "current_tier": 0,
         "token_history": [],
     },
     "display": {
         "refresh_count": 0,
-        "tier_up_burst_remaining": 0,
-        "tier_up_burst_lines": [],
-        "tier_up_burst_type": None,
+        "last_quip": INTRO_QUIP,
     },
 }
 
 
-# ── I/O helpers ──────────────────────────────────────────────────────────────
+# ── I/O helpers ───────────────────────────────────────────────────────────────
 
 def load_json(path: str, default: dict) -> dict:
     try:
@@ -403,29 +463,97 @@ def deep_merge(base: dict, override: dict) -> dict:
     return result
 
 
-# ── Core logic ───────────────────────────────────────────────────────────────
+# ── XP / level system ────────────────────────────────────────────────────────
+
+def xp_for_level(n: int, base: float, exp: float) -> int:
+    """Tokens required to reach level n (1-indexed). Level 1 costs base tokens."""
+    return int(base * (n ** exp))
+
+
+def xp_threshold(level: int, base: float, exp: float) -> int:
+    """Cumulative tokens needed to reach `level` (0-indexed tier → level 1 = tier 0)."""
+    if level <= 0:
+        return 0
+    return sum(xp_for_level(n, base, exp) for n in range(1, level + 1))
+
+
+def get_tier(total_tokens: int, base: float, exp: float) -> int:
+    """Return 0-indexed tier (0–19) for a given cumulative token count."""
+    tier = 0
+    for t in range(1, len(TIERS)):
+        if total_tokens >= xp_threshold(t, base, exp):
+            tier = t
+        else:
+            break
+    return min(tier, len(TIERS) - 1)
+
+
+def level_progress(total_tokens: int, tier: int, base: float, exp: float) -> tuple[int, int, float]:
+    """Return (tokens_into_level, tokens_needed_for_level, pct) for current tier."""
+    start = xp_threshold(tier, base, exp)
+    end = xp_threshold(tier + 1, base, exp)
+    into = max(0, total_tokens - start)
+    needed = end - start
+    pct = min(100.0, into / needed * 100) if needed > 0 else 100.0
+    return into, needed, pct
+
+
+# ── Session update ────────────────────────────────────────────────────────────
 
 def update_session(stats: dict, data: dict, config: dict) -> dict:
     session_id = data.get("session_id", "unknown")
     cost = (data.get("cost") or {}).get("total_cost_usd") or 0.0
-    model_id = (data.get("model") or {}).get("id") or "claude-sonnet-4-6"
+    ctx = data.get("context_window") or {}
+    tokens = ctx.get("total_input_tokens") or 0
 
     prev = stats["sessions"].get(session_id, {})
     prev_cost = prev.get("last_cost_usd", 0.0)
+    prev_tokens = prev.get("last_tokens", 0)
+    cost_base = prev.get("cost_base", 0.0)
+
+    if cost <= 0:
+        cost = prev_cost  # no cost info yet (e.g. first render): don't read it as a reset
+    elif cost < prev_cost - 0.0001:
+        # The CLI's counter restarted under the same session_id (resumed in a new
+        # process). Bank the old total so the session's real cost survives; the
+        # session total is cost_base + last_cost_usd.
+        # ponytail: one process per session assumed; the same session open in two
+        # terminals at once would bank repeatedly and overcount.
+        cost_base += prev_cost
+        prev_cost = 0.0
 
     if cost > prev_cost + 0.0001:
-        turn_cost = cost - prev_cost
         stats["global"]["total_turns"] += 1
-        stats["global"]["total_spend_usd"] += turn_cost
+        stats["global"]["total_spend_usd"] += cost - prev_cost
 
-        window = config["rolling_window"]
-        stats["global"]["rolling_cost_per_turn"].append(turn_cost)
-        stats["global"]["rolling_cost_per_turn"] = stats["global"]["rolling_cost_per_turn"][-window:]
+    if tokens > prev_tokens:
+        delta = tokens - prev_tokens
+        stats["global"]["total_input_tokens"] += delta
 
-    stats["sessions"][session_id] = {"last_cost_usd": cost, "model_id": model_id}
+    # Merge, don't replace: a bare assignment here dropped model_id on every
+    # render, which is why only 7 of 219 sessions ever retained it.
+    entry = dict(prev)
+    entry["last_cost_usd"] = cost
+    entry["last_tokens"] = tokens
+    if cost_base:
+        entry["cost_base"] = cost_base
+    try:
+        model_id = (data.get("model") or {}).get("id") or entry.get("model_id")
+        if model_id:
+            entry["model_id"] = model_id
+        # current_usage is None before the first API call and just after /compact
+        usage = ctx.get("current_usage") or {}
+        if usage:
+            entry["last_usage"] = {
+                "in": usage.get("input_tokens") or 0,
+                "out": usage.get("output_tokens") or 0,
+                "cache_read": usage.get("cache_read_input_tokens") or 0,
+                "cache_creation": usage.get("cache_creation_input_tokens") or 0,
+            }
+    except Exception:  # noqa: BLE001 - diagnostics must never break the prompt
+        pass
+    stats["sessions"][session_id] = entry
 
-    ctx = data.get("context_window") or {}
-    tokens = ctx.get("total_input_tokens") or 0
     history = stats["global"].get("token_history", [])
     history.append(tokens)
     stats["global"]["token_history"] = history[-HISTORY_LEN:]
@@ -433,66 +561,65 @@ def update_session(stats: dict, data: dict, config: dict) -> dict:
     return stats
 
 
-def compute_efficiency_score(stats: dict, model_id: str, config: dict) -> float:
-    rolling = stats["global"]["rolling_cost_per_turn"]
-    if not rolling:
-        return 1.0
-    avg = sum(rolling) / len(rolling)
-    base = config["model_base_costs"].get(model_id, 0.006)
-    return avg / base if base > 0 else 1.0
+# ── Level-up notification ─────────────────────────────────────────────────────
+
+def notify_level_up(tier: int) -> None:
+    t = TIERS[tier]
+    title = f"Level {tier + 1}: {t['name']}"
+    body = t["tier_up_lines"][0] if t["tier_up_lines"] else ""
+
+    # Append to log
+    try:
+        from datetime import datetime
+        ts = datetime.now().strftime("%Y-%m-%d %H:%M")
+        with open(LEVELUP_LOG, "a") as f:
+            f.write(f"\n[{ts}] LEVEL UP → {title}\n")
+            for line in t["tier_up_lines"]:
+                f.write(f"  {line}\n")
+    except OSError:
+        pass
+
+    # Desktop notification
+    system = platform.system()
+    try:
+        if system == "Linux":
+            subprocess.Popen(
+                ["notify-send", "-t", "8000", title, body],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+        elif system == "Darwin":
+            script = f'display notification "{body}" with title "{title}"'
+            subprocess.Popen(
+                ["osascript", "-e", script],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+    except (FileNotFoundError, OSError):
+        pass
 
 
-def prestige_increment(stats: dict) -> float:
-    turns = stats["global"]["total_turns"]
-    spend = stats["global"]["total_spend_usd"]
-    return math.log10(turns + 1) * 0.1 + math.log10(spend * 100 + 1) * 0.05
+# ── Quip system ───────────────────────────────────────────────────────────────
+
+def get_quip(stats: dict, config: dict) -> str | None:
+    rc = stats["display"]["refresh_count"]
+    interval = config["quip_interval"]
+    if rc % interval != 0 or rc == 0:
+        return None
+    tier = stats["global"]["current_tier"]
+    quips = TIERS[tier]["quips"]
+    idx = (rc // interval) % len(quips)
+    return quips[idx]
 
 
-def update_prestige(stats: dict, efficiency_score: float, config: dict) -> dict:
-    inc = prestige_increment(stats)
-    if efficiency_score < config["efficiency_threshold_efficient"]:
-        stats["global"]["efficient_prestige"] += inc
-    elif efficiency_score > config["efficiency_threshold_wasteful"]:
-        stats["global"]["wasteful_prestige"] += inc
-    return stats
-
-
-def get_tier_index(prestige: float) -> int:
-    for i in range(len(TIER_BREAKPOINTS) - 1, -1, -1):
-        if prestige >= TIER_BREAKPOINTS[i]:
-            return i
-    return 0
-
-
-def check_tier_up(stats: dict, new_eff: int, new_wst: int, config: dict, theme: dict) -> dict:
-    old_eff = stats["global"]["efficient_tier"]
-    old_wst = stats["global"]["wasteful_tier"]
-
-    if new_eff > old_eff:
-        tier = theme["efficient_tiers"][new_eff]
-        stats["display"]["tier_up_burst_lines"] = tier["tier_up_lines"]
-        stats["display"]["tier_up_burst_type"] = "efficient"
-        stats["display"]["tier_up_burst_remaining"] = config["tier_up_burst_duration"]
-        stats["global"]["efficient_tier"] = new_eff
-    elif new_wst > old_wst:
-        tier = theme["wasteful_tiers"][new_wst]
-        stats["display"]["tier_up_burst_lines"] = tier["tier_up_lines"]
-        stats["display"]["tier_up_burst_type"] = "wasteful"
-        stats["display"]["tier_up_burst_remaining"] = config["tier_up_burst_duration"]
-        stats["global"]["wasteful_tier"] = new_wst
-
-    return stats
-
-
-# ── Formatting ───────────────────────────────────────────────────────────────
+# ── Formatting ────────────────────────────────────────────────────────────────
 
 def ansi(text: str, code: str) -> str:
     return f"{C[code]}{text}{C['reset']}"
 
 
-def fmt_bar(pct: float, width: int = 10) -> str:
+def fmt_xp_bar(pct: float, color: str, width: int = 10) -> str:
     filled = round(pct / 100 * width)
-    return "[" + "█" * filled + "░" * (width - filled) + "]"
+    bar = "█" * filled + "░" * (width - filled)
+    return f"[{color}{bar}{C['reset']}]"
 
 
 def fmt_sparkline(values: list) -> str:
@@ -517,94 +644,50 @@ def fmt_cost(usd: float) -> str:
     return f"${usd:.5f}"
 
 
-def fmt_session_line(data: dict, stats: dict, theme: dict) -> str:
+def fmt_session_line(data: dict, stats: dict, config: dict) -> str:
     ctx = data.get("context_window") or {}
     cost_data = data.get("cost") or {}
 
-    used_pct = ctx.get("used_percentage") or 0
-    tokens = ctx.get("total_input_tokens") or 0
+    ctx_pct = ctx.get("used_percentage") or 0
+    session_tokens = ctx.get("total_input_tokens") or 0
     total_cost = cost_data.get("total_cost_usd") or 0.0
 
-    bar = fmt_bar(used_pct)
+    tier = stats["global"]["current_tier"]
+    base = config.get("xp_base", XP_BASE)
+    exp = config.get("xp_exp", XP_EXP)
+    total_xp = stats["global"]["total_input_tokens"]
+
+    _, _, pct = level_progress(total_xp, tier, base, exp)
+    color = tier_color(tier)
+    bar = fmt_xp_bar(pct, color)
     spark = fmt_sparkline(stats["global"]["token_history"])
-    eff_idx = stats["global"]["efficient_tier"]
-    wst_idx = stats["global"]["wasteful_tier"]
+    tier_name = TIERS[tier]["name"]
 
-    eff_tier = theme["efficient_tiers"][eff_idx]
-    wst_tier = theme["wasteful_tiers"][wst_idx]
-
-    tier_str = (
-        f"{eff_tier['symbol']} E{eff_idx+1}:{eff_tier['name']}  "
-        f"{wst_tier['symbol']} W{wst_idx+1}:{wst_tier['name']}"
-    )
-
-    return f"Session:  {bar} {used_pct:.0f}% {spark} {fmt_tokens(tokens)} {fmt_cost(total_cost)}  | {tier_str}"
-
-
-def fmt_global_line(stats: dict) -> str:
-    g = stats["global"]
-    turns = g["total_turns"]
-    spend = g["total_spend_usd"]
-    rolling = g["rolling_cost_per_turn"]
-    avg = sum(rolling) / len(rolling) if rolling else 0.0
+    next_xp = xp_threshold(tier + 1, base, exp)
 
     return (
-        f"Global:   {fmt_cost(spend)} total | {turns} turns | "
-        f"avg {fmt_cost(avg)}/turn"
+        f"{bar} Lv.{tier+1} · {pct:.0f}% → {tier_name}"
+        f"  |  Session:  ctx {ctx_pct:.0f}%"
+        f"  ↑{fmt_tokens(session_tokens)} tok"
+        f"  {fmt_cost(total_cost)}"
+        f"  {spark}"
     )
 
 
-def fmt_tier_up_burst(stats: dict) -> list:
-    remaining = stats["display"]["tier_up_burst_remaining"]
-    if remaining <= 0:
-        return []
+def fmt_global_line(stats: dict, config: dict) -> str:
+    g = stats["global"]
+    base = config.get("xp_base", XP_BASE)
+    exp = config.get("xp_exp", XP_EXP)
+    tier = g["current_tier"]
+    total_xp = g["total_input_tokens"]
+    next_xp = xp_threshold(tier + 1, base, exp)
 
-    lines_raw = stats["display"]["tier_up_burst_lines"]
-    burst_type = stats["display"]["tier_up_burst_type"]
-    header_color = "bcyan" if burst_type == "efficient" else "bred"
-    body_color = "cyan" if burst_type == "efficient" else "yellow"
-
-    stats["display"]["tier_up_burst_remaining"] -= 1
-
-    if remaining == 1:
-        return [ansi("> [tier-up acknowledged]", "dim")]
-    elif remaining >= 5:
-        out = []
-        if lines_raw:
-            out.append(ansi(lines_raw[0], header_color))
-            for line in lines_raw[1:]:
-                out.append(ansi(line, body_color))
-        return out
-    else:
-        return [ansi(line, body_color) for line in lines_raw[1:]] if len(lines_raw) > 1 else []
-
-
-def get_quip(stats: dict, theme: dict, config: dict) -> str | None:
-    rc = stats["display"]["refresh_count"]
-    interval = config["quip_interval"]
-    if rc % interval != 0 or rc == 0:
-        return None
-
-    eff_idx = stats["global"]["efficient_tier"]
-    wst_idx = stats["global"]["wasteful_tier"]
-
-    rolling = stats["global"]["rolling_cost_per_turn"]
-    avg = sum(rolling) / len(rolling) if rolling else 0.0
-    base = config["model_base_costs"].get("claude-sonnet-4-6", 0.006)
-    score = avg / base if base > 0 else 1.0
-
-    if score < config["efficiency_threshold_efficient"]:
-        quips = theme["efficient_tiers"][eff_idx]["quips"]
-    elif score > config["efficiency_threshold_wasteful"]:
-        quips = theme["wasteful_tiers"][wst_idx]["quips"]
-    else:
-        quips = (
-            theme["efficient_tiers"][eff_idx]["quips"]
-            + theme["wasteful_tiers"][wst_idx]["quips"]
-        )
-
-    idx = (rc // interval) % len(quips)
-    return f"[{quips[idx]}]"
+    return (
+        f"Global:  {fmt_cost(g['total_spend_usd'])} total"
+        f" · {g['total_turns']} turns"
+        f" · avg {fmt_cost(g['total_spend_usd'] / g['total_turns'] if g['total_turns'] else 0)}/turn"
+        f" · {fmt_tokens(total_xp)} xp → {fmt_tokens(next_xp)} next"
+    )
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
@@ -613,39 +696,43 @@ def main() -> None:
     try:
         data = json.load(sys.stdin)
     except (json.JSONDecodeError, ValueError):
-        print("Session:  [??????????] --% -------- -- -----")
+        print("[ ░░░░░░░░░░] Lv.1 · 0% → Terminal Operator  |  ctx --%  ↑-- tok  $-----")
         return
 
     config = deep_merge(DEFAULT_CONFIG, load_json(CONFIG_PATH, {}))
+    # Every open session renders concurrently; without a lock their
+    # read-modify-write cycles overwrite each other's updates.
+    lock = open(STATS_PATH + ".lock", "w")
+    try:
+        import fcntl
+        fcntl.flock(lock, fcntl.LOCK_EX)  # released when `lock` closes at exit
+    except (ImportError, OSError):
+        pass  # no fcntl (Windows): fall back to unlocked, as before
     stats = deep_merge(DEFAULT_STATS, load_json(STATS_PATH, {}))
 
-    model_id = (data.get("model") or {}).get("id") or "claude-sonnet-4-6"
-    theme_name = config.get("theme", "corpo")
-    theme = THEMES.get(theme_name, THEMES["corpo"])
-
     stats = update_session(stats, data, config)
-    efficiency_score = compute_efficiency_score(stats, model_id, config)
-    stats = update_prestige(stats, efficiency_score, config)
 
-    new_eff = get_tier_index(stats["global"]["efficient_prestige"])
-    new_wst = get_tier_index(stats["global"]["wasteful_prestige"])
-    stats = check_tier_up(stats, new_eff, new_wst, config, theme)
+    base = config.get("xp_base", XP_BASE)
+    exp = config.get("xp_exp", XP_EXP)
+    total_xp = stats["global"]["total_input_tokens"]
+    new_tier = get_tier(total_xp, base, exp)
+    old_tier = stats["global"]["current_tier"]
 
-    burst_lines = fmt_tier_up_burst(stats)
+    if new_tier > old_tier:
+        stats["global"]["current_tier"] = new_tier
+        notify_level_up(new_tier)
+
+    new_quip = get_quip(stats, config)
+    if new_quip:
+        stats["display"]["last_quip"] = new_quip
+
     stats["display"]["refresh_count"] += 1
-
-    quip = get_quip(stats, theme, config)
 
     save_stats(stats)
 
-    output = []
-    output.extend(burst_lines)
-    output.append(fmt_session_line(data, stats, theme))
-    output.append(fmt_global_line(stats))
-    if quip:
-        output.append(quip)
-
-    print("\n".join(output))
+    print(fmt_session_line(data, stats, config))
+    print(fmt_global_line(stats, config))
+    print(stats["display"]["last_quip"])
 
 
 if __name__ == "__main__":
